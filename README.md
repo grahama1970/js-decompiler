@@ -20,7 +20,9 @@ To learn how to break down a minified JavaScript file into manageable parts, app
 ## 📋 Prerequisites
 
 - **Node.js** v22.15.0 or later (`node --version` to check).
-- **Google Vertex AI** service account JSON key, placed in `config/vertex_ai_service_account.json`.
+- One of the following LLM providers:
+  - **Google Vertex AI** service account JSON key, placed in `config/vertex_ai_service_account.json`.
+  - **Ollama** local instance running at `http://localhost:11435` (default port) with your preferred model.
 - **Git** (optional, for version control).
 
 ## 🛠️ Installation
@@ -38,11 +40,19 @@ To learn how to break down a minified JavaScript file into manageable parts, app
    ```bash
    npm install
    ```
-   This installs `prettier`, `webcrack`, `tree-sitter`, `@langchain/google-vertexai`, `dotenv`, `yargs`, and `eslint`.
-5. Place your Vertex AI service account JSON key in `config/vertex_ai_service_account.json`.
+   This installs `prettier`, `webcrack`, `tree-sitter`, `@langchain/google-vertexai`, `ollama`, `dotenv`, `yargs`, and `eslint`.
+5. Configure your preferred LLM provider:
+   - For **Vertex AI**: Place your service account JSON key in `config/vertex_ai_service_account.json`.
+   - For **Ollama**: Ensure your Ollama server is running (check with `docker ps` if using Docker).
 6. Create a `config/.env` file:
    ```env
+   # For Vertex AI
    VERTEX_AI_CREDENTIALS_PATH=config/vertex_ai_service_account.json
+   
+   # For Ollama
+   LLM_PROVIDER=ollama
+   OLLAMA_HOST=http://localhost:11435
+   OLLAMA_MODEL=qwen3:30b-a3b-q8_0
    ```
 7. Ensure `.gitignore` includes `config/vertex_ai_service_account.json`, `.env`, `node_modules/`, and `output/` to protect sensitive data.
 
@@ -73,13 +83,23 @@ project-root/
 Run the script with a minified JavaScript file:
 
 ```bash
-node src/deconstruct_pipeline.js <input_file> [--output-dir <path>]
+node src/deconstruct_pipeline.js <input_file> [--output-dir <path>] [--llm-provider <provider>] [--llm-model <model>] [--skip-llm]
 ```
 
-**Example**:
+**Examples**:
 
 ```bash
+# Using Google Vertex AI (default)
 node src/deconstruct_pipeline.js input/cli.js --output-dir output/custom
+
+# Using local Ollama instance
+node src/deconstruct_pipeline.js input/cli.js --llm-provider ollama --llm-model qwen3:30b-a3b-q8_0
+
+# Using local Ollama with custom host
+node src/deconstruct_pipeline.js input/cli.js --llm-provider ollama --ollama-host http://localhost:11435
+
+# Skip LLM analysis (faster for testing)
+node src/deconstruct_pipeline.js input/cli.js --skip-llm
 ```
 
 **Help**:
@@ -91,7 +111,7 @@ node src/deconstruct_pipeline.js --help
 Alternatively, use the npm script:
 
 ```bash
-npm start input/cli.js --output-dir output/custom
+npm start input/cli.js --llm-provider ollama
 ```
 
 ## 📥 Expected Input
@@ -151,7 +171,7 @@ graph TD
     A[📄 Input File<br>input/cli.js] -->|Minified JS| B[🖌️ Prettier]
     B -->|Formatted Code| C[🔍 Webcrack]
     C -->|Deobfuscated Code| D[🌳 Tree-sitter]
-    D -->|Modular Files| E[🤖 Vertex AI]
+    D -->|Modular Files| E[🤖 LLM Analysis<br>Vertex AI or Ollama]
     E -->|Descriptions| F[📂 Output<br>output/deconstructed_output/]
     
     classDef pipeline fill:#4B8BBE,stroke:#333,stroke-width:2px,color:#FFF;
@@ -162,12 +182,14 @@ graph TD
 1. **🖌️ Prettier**: Formats minified code for readability, saving to `1_minified_prettier.js`.
 2. **🔍 Webcrack**: Deobfuscates variable names, saving to `2_minified_webcrack.js`.
 3. **🌳 Tree-sitter**: Parses code into modular files (e.g., functions, classes), saving to `3_minified_tree_sitter/`.
-4. **🤖 Vertex AI**: Analyzes each file with Google Vertex AI, generating descriptions in `llm_analysis.md`.
+4. **🤖 LLM Analysis**: Analyzes each file using either Google Vertex AI or Ollama, generating descriptions in `llm_analysis.md`.
 5. **📂 Output**: Includes sourcemap (`sourcemap.json`), dependency graph (`dependency_graph.json`), and a README.
 
 ## 📝 Notes
 
-- **Vertex AI Setup**: Obtain a service account JSON key from Google Cloud (see https://cloud.google.com/vertex-ai/docs). Ensure it has `roles/aiplatform.user` permissions.
+- **LLM Setup**:
+  - **Vertex AI**: Obtain a service account JSON key from Google Cloud (see https://cloud.google.com/vertex-ai/docs). Ensure it has `roles/aiplatform.user` permissions.
+  - **Ollama**: Install Ollama locally or use Docker. Run with `ollama serve` or use the Docker container (default port: 11434).
 - **Performance**: Monitor memory usage for large files during Tree-sitter parsing.
 - **Security**: Never commit `config/vertex_ai_service_account.json` or `.env`. Verify `.gitignore`.
 - **Extensibility**: Add utility functions to `src/utils/` or tests to `tests/` as needed.
@@ -192,6 +214,7 @@ graph TD
 - Webcrack: https://github.com/j4k0xb/webcrack
 - Tree-sitter: https://tree-sitter.github.io/
 - LangChain.js (Vertex AI): https://js.langchain.com/docs/integrations/chat/google_vertex_ai
+- Ollama: https://github.com/ollama/ollama
 - Yargs: https://yargs.js.org/
 - Google Vertex AI: https://cloud.google.com/vertex-ai/docs
 - Node.js: https://nodejs.org/

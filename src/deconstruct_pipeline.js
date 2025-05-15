@@ -6,7 +6,7 @@
  * Target file: input/cli.js (or any minified .js file)
  *
  * Usage:
- *   node src/deconstruct_pipeline.js <input_file> [--output-dir <path>]
+ *   node src/deconstruct_pipeline.js <input_file> [--output-dir <path>] [--llm-provider <provider>] [--llm-model <model>] [--skip-llm]
  *   Example: node src/deconstruct_pipeline.js input/cli.js --output-dir output/custom
  *   Run `node src/deconstruct_pipeline.js --help` for details.
  *
@@ -15,7 +15,9 @@
  * 1. Prettier: Formats code for readability.
  * 2. Webcrack: Deobfuscates variable names.
  * 3. Tree-sitter: Splits code into modular files (functions, classes, etc.).
- * 4. Vertex AI: Generates LLM descriptions for each file using Google Vertex AI (via LangChain.js).
+ * 4. LLM Analysis: Generates descriptions for each file using either:
+ *    - Google Vertex AI (via LangChain.js)
+ *    - Local Ollama instance (running models like qwen3:30b-a3b-q8_0)
  * It creates a pseudo-sourcemap, dependency graph, and LLM analysis.
  *
  * Third-party documentation:
@@ -23,6 +25,7 @@
  * - Webcrack: https://github.com/j4k0xb/webcrack
  * - Tree-sitter: https://tree-sitter.github.io/
  * - LangChain.js (Vertex AI): https://js.langchain.com/docs/integrations/chat/google_vertex_ai
+ * - Ollama: https://github.com/ollama/ollama
  * - Yargs: https://yargs.js.org/
  *
  * Expected input: Minified JavaScript files with:
@@ -51,6 +54,7 @@ const webcrack = require('webcrack'); // Deobfuscation
 const Parser = require('tree-sitter'); // AST parsing
 const JavaScript = require('tree-sitter-javascript'); // JavaScript grammar for Tree-sitter
 const { ChatVertexAI } = require('@langchain/google-vertexai'); // Vertex AI LLM calls
+const ollama = require('ollama'); // Ollama LLM for local models
 const yargs = require('yargs'); // CLI argument parsing (Python: argparse)
 
 // Local modules
@@ -62,12 +66,33 @@ parser.setLanguage(JavaScript);
 
 // Parse CLI arguments with yargs
 const argv = yargs
-    .usage('Usage: node $0 <input_file> [--output-dir <path>]')
+    .usage('Usage: node $0 <input_file> [--output-dir <path>] [--skip-llm] [--llm-provider <provider>] [--llm-model <model>]')
     .demandCommand(1, 'You must provide an input JavaScript file.')
     .option('output-dir', {
         type: 'string',
         description: 'Output directory for results',
         default: 'output/deconstructed_output',
+    })
+    .option('skip-llm', {
+        type: 'boolean',
+        description: 'Skip the LLM analysis step',
+        default: false,
+    })
+    .option('llm-provider', {
+        type: 'string',
+        description: 'LLM provider to use (vertex or ollama)',
+        choices: ['vertex', 'ollama'],
+        default: LLM_PROVIDER,
+    })
+    .option('llm-model', {
+        type: 'string',
+        description: 'Model name to use with the selected provider',
+        default: null,  // Will use provider-specific default if not specified
+    })
+    .option('ollama-host', {
+        type: 'string',
+        description: 'Host URL for Ollama server',
+        default: OLLAMA_HOST,
     })
     .check((argv) => {
         if (!argv._[0].endsWith('.js')) {
@@ -102,13 +127,21 @@ async function loadCredentials() {
     }
 }
 
+// LLM configuration
+const LLM_PROVIDER = process.env.LLM_PROVIDER || 'vertex'; // 'vertex' or 'ollama'
+
 // Vertex AI model configuration
 const VERTEX_AI_MODEL = process.env.VERTEX_AI_MODEL || 'gemini-2.5-flash-preview-04-17';
 const VERTEX_AI_LOCATION = process.env.VERTEX_AI_LOCATION || 'us-central1';
 const VERTEX_AI_MAX_OUTPUT_TOKENS = parseInt(process.env.VERTEX_AI_MAX_OUTPUT_TOKENS || '1000');
 
-// Initialize Vertex AI model - will be configured when credentials are loaded
-let vertexModel;
+// Ollama model configuration
+const OLLAMA_HOST = process.env.OLLAMA_HOST || 'http://localhost:11435';
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen3:30b-a3b-q8_0';
+const OLLAMA_MAX_TOKENS = parseInt(process.env.OLLAMA_MAX_TOKENS || '1000');
+
+// Initialize LLM model - will be configured based on provider
+let llmModel;
 
 // Validate input file
 async function validateInputFile(inputFile) {
@@ -389,10 +422,29 @@ async function runLLMAnalysis(inputDir, sourcemapFile, dependencyGraphFile, outp
 
     // Simple retry logic for LLM calls (Python: tenacity.retry)
     async function invokeWithRetry(prompt, maxRetries = 3) {
+        const llmProvider = argv.llmProvider || LLM_PROVIDER;
+        
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                const response = await vertexModel.invoke([{ role: 'user', content: prompt }]);
-                return response.content || 'No response from LLM';
+                let response;
+                
+                if (llmProvider === 'vertex') {
+                    // Call Vertex AI
+                    response = await llmModel.invoke([{ role: 'user', content: prompt }]);
+                    return response.content || 'No response from LLM';
+                } else if (llmProvider === 'ollama') {
+                    // Call Ollama
+                    response = await ollama.chat({
+                        model: llmModel.model,
+                        messages: [{ role: 'user', content: prompt }],
+                        options: { 
+                            max_tokens: llmModel.maxTokens 
+                        }
+                    });
+                    return response.message.content || 'No response from LLM';
+                } else {
+                    throw new Error(`Unsupported LLM provider: ${llmProvider}`);
+                }
             } catch (error) {
                 if (attempt === maxRetries) {
                     throw error;
@@ -461,17 +513,40 @@ async function runPipeline() {
     console.log('Starting pipeline...');
 
     try {
-        // Load credentials
-        vertexCredentials = await loadCredentials();
+        // Initialize LLM based on provider
+        const llmProvider = argv.llmProvider || LLM_PROVIDER;
+        console.log(`Using LLM provider: ${llmProvider}`);
         
-        // Initialize Vertex AI model with the loaded credentials and configuration
-        vertexModel = new ChatVertexAI({
-            model: VERTEX_AI_MODEL,
-            projectId: vertexCredentials?.project_id || 'your-project-id',
-            location: VERTEX_AI_LOCATION,
-            credentials: vertexCredentials,
-            maxOutputTokens: VERTEX_AI_MAX_OUTPUT_TOKENS,
-        });
+        if (llmProvider === 'vertex') {
+            // Load Vertex AI credentials
+            vertexCredentials = await loadCredentials();
+            
+            // Initialize Vertex AI model
+            const modelName = argv.llmModel || VERTEX_AI_MODEL;
+            console.log(`Initializing Vertex AI with model: ${modelName}`);
+            
+            llmModel = new ChatVertexAI({
+                model: modelName,
+                projectId: vertexCredentials?.project_id || 'your-project-id',
+                location: VERTEX_AI_LOCATION,
+                credentials: vertexCredentials,
+                maxOutputTokens: VERTEX_AI_MAX_OUTPUT_TOKENS,
+            });
+        } else if (llmProvider === 'ollama') {
+            // Initialize Ollama client
+            const modelName = argv.llmModel || OLLAMA_MODEL;
+            const hostUrl = argv.ollamaHost || OLLAMA_HOST;
+            console.log(`Initializing Ollama with model: ${modelName} at ${hostUrl}`);
+            
+            // Configure Ollama client
+            ollama.config({ host: hostUrl });
+            llmModel = { 
+                model: modelName,
+                maxTokens: OLLAMA_MAX_TOKENS 
+            };
+        } else {
+            throw new Error(`Unsupported LLM provider: ${llmProvider}`);
+        }
         
         // Validate input
         await validateInputFile(inputFile);
@@ -486,16 +561,22 @@ async function runPipeline() {
         await addJSDocComments(treeSitterOutputDir);
         await generateDependencyGraph(treeSitterOutputDir, path.join(outputDir, 'dependency_graph.json'));
         // Wait for file to be written before proceeding to next step
-        const sourcemapPath = path.join(treeSitterOutputDir, 'sourcemap.json');
+        const sourcemapPath = path.join(outputDir, 'sourcemap.json');
         const dependencyGraphPath = path.join(outputDir, 'dependency_graph.json');
         
-        await runLLMAnalysis(
-            treeSitterOutputDir,
-            sourcemapPath,
-            dependencyGraphPath,
-            path.join(outputDir, 'llm_analysis.md'),
-            chunks
-        );
+        // Skip LLM analysis if requested
+        if (!argv.skipLlm) {
+            console.log(`Running LLM analysis with provider: ${argv.llmProvider}...`);
+            await runLLMAnalysis(
+                treeSitterOutputDir,
+                sourcemapPath,
+                dependencyGraphPath,
+                path.join(outputDir, 'llm_analysis.md'),
+                chunks
+            );
+        } else {
+            console.log('Skipping LLM analysis as requested.');
+        }
         await generateReadme();
         console.log('Pipeline complete.');
     } catch (error) {
@@ -523,7 +604,9 @@ This script deconstructs a minified JavaScript file into modular components to a
 
 ## Prerequisites
 - Node.js v22.15.0 or later
-- Google Vertex AI service account JSON key (in config/vertex_ai_service_account.json)
+- One of the following LLM providers:
+  - Google Vertex AI service account JSON key (in config/vertex_ai_service_account.json)
+  - Local Ollama instance running at http://localhost:11435 (or custom host)
 
 ## Installation
 1. Clone this repository or copy the project files.
@@ -567,13 +650,22 @@ project-root/
 ## Usage
 Run the script with a minified JavaScript file:
 \`\`\`bash
-node src/deconstruct_pipeline.js <input_file> [--output-dir <path>]
+node src/deconstruct_pipeline.js <input_file> [--output-dir <path>] [--llm-provider <provider>] [--llm-model <model>] [--skip-llm]
 \`\`\`
-Example:
+
+Examples:
 \`\`\`bash
+# Using Google Vertex AI (default)
 node src/deconstruct_pipeline.js input/cli.js --output-dir output/custom
+
+# Using local Ollama instance
+node src/deconstruct_pipeline.js input/cli.js --llm-provider ollama --llm-model qwen3:30b-a3b-q8_0
+
+# Skip LLM analysis (faster for testing)
+node src/deconstruct_pipeline.js input/cli.js --skip-llm
 \`\`\`
-Run \`node src/deconstruct_pipeline.js --help\` for options.
+
+Run \`node src/deconstruct_pipeline.js --help\` for all options.
 
 ## Expected Input
 Minified JavaScript files with:
