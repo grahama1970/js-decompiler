@@ -7,13 +7,14 @@
  * This is a simplified JavaScript version based on Python's MapReduce pattern.
  */
 
-const fs = require('fs').promises;
-const path = require('path');
+import { promises as fs } from 'fs';
+import path from 'path';
+import { chunkContent, chunkByTokens } from './chunker.js';
 
 // Configuration defaults
 const DEFAULT_CONFIG = {
     chunkSize: 3500,            // Maximum tokens per chunk
-    overlapSize: 100,           // Number of characters for overlap
+    overlapSize: 100,           // Number of tokens for overlap
     recursionLimit: 3,          // Maximum recursion depth for reduction
     contextLimitThreshold: 3800 // Maximum tokens to send to LLM
 };
@@ -37,47 +38,13 @@ function estimateTokenCount(text) {
  * 
  * @param {string} text - Text to chunk
  * @param {number} chunkSize - Maximum tokens per chunk 
- * @param {number} overlapSize - Number of characters for overlap
+ * @param {number} overlapSize - Number of tokens for overlap
  * @returns {string[]} - Array of text chunks
  */
 function createChunksWithOverlap(text, chunkSize, overlapSize) {
-    // Convert tokens to approximate characters for chunking
-    const charsPerToken = 4; // Approximation
-    const chunkSizeChars = chunkSize * charsPerToken;
-    const overlapSizeChars = overlapSize * charsPerToken;
-    
-    // Split into sentences (simplified)
-    const sentences = text.split(/(?<=[.!?])\s+/);
-    
-    const chunks = [];
-    let currentChunk = '';
-    
-    for (const sentence of sentences) {
-        // If this sentence would make the chunk too large, finalize current chunk
-        if (estimateTokenCount(currentChunk + sentence) > chunkSize) {
-            if (currentChunk) {
-                chunks.push(currentChunk);
-            }
-            
-            // Start a new chunk, potentially with some overlap
-            if (overlapSizeChars > 0 && currentChunk.length > overlapSizeChars) {
-                // Extract the end of previous chunk for overlap
-                currentChunk = currentChunk.slice(-overlapSizeChars);
-            } else {
-                currentChunk = '';
-            }
-        }
-        
-        // Add sentence to current chunk
-        currentChunk += (currentChunk ? ' ' : '') + sentence;
-    }
-    
-    // Add the last chunk if it's not empty
-    if (currentChunk) {
-        chunks.push(currentChunk);
-    }
-    
-    return chunks;
+    // Use the chunker utility to create token-based chunks
+    const chunks = chunkByTokens(text, chunkSize, true, overlapSize);
+    return chunks.map(chunk => chunk.content);
 }
 
 /**
@@ -95,234 +62,177 @@ async function summarizeChunk(chunkText, llmClient, config, prompt) {
     try {
         let response;
         
-        if (config.provider === 'vertex') {
+        // Handle different LLM providers
+        if (llmClient.provider === 'vertex') {
             // Call Vertex AI
-            response = await llmClient.invoke([
-                { role: 'system', content: prompt },
-                { role: 'user', content: chunkText }
+            response = await llmClient.model.invoke([
+                { role: 'user', content: prompt + '\n\n' + chunkText }
             ]);
             
-            // Extract content from response
-            return response.content;
-        } else if (config.provider === 'ollama') {
+            // Extract content from response based on structure
+            if (response.content) {
+                return response.content;
+            } else if (response.lc_kwargs?.content) {
+                return response.lc_kwargs.content;
+            } else if (typeof response === 'string') {
+                return response;
+            }
+            return 'Unexpected response format';
+            
+        } else if (llmClient.provider === 'ollama') {
             // Call Ollama
             response = await llmClient.client.chat({
                 model: llmClient.model,
-                messages: [
-                    { role: 'system', content: prompt },
-                    { role: 'user', content: chunkText }
-                ],
-                options: {
-                    max_tokens: config.maxTokens || 1000,
+                messages: [{ role: 'user', content: prompt + '\n\n' + chunkText }],
+                options: { 
+                    max_tokens: llmClient.maxTokens,
                     temperature: 0.1
                 }
             });
             
-            return response.message.content;
-        } else {
-            throw new Error(`Unsupported provider: ${config.provider}`);
+            // Extract content from Ollama response
+            if (response.message?.content) {
+                return response.message.content;
+            } else if (response.text || response.content) {
+                return response.text || response.content;
+            } else if (typeof response === 'string') {
+                return response;
+            }
+            return 'Unexpected response format';
         }
+        
+        throw new Error(`Unsupported LLM provider: ${llmClient.provider}`);
     } catch (error) {
         console.error(`Error summarizing chunk: ${error.message}`);
-        return `Error summarizing: ${error.message}`;
+        return `ERROR: ${error.message}`;
     }
 }
 
 /**
- * Recursively reduce text if it exceeds context limits
- * 
- * @param {string} textToReduce - Text to reduce
- * @param {Object} llmClient - LLM client
- * @param {Object} config - Configuration options
- * @param {string} finalPrompt - Prompt for final reduction
- * @param {number} currentDepth - Current recursion depth
- * @returns {Promise<string>} - Reduced text
- */
-async function recursiveReduce(textToReduce, llmClient, config, finalPrompt, currentDepth = 0) {
-    const inputTokens = estimateTokenCount(textToReduce);
-    
-    // Base case: Text fits within context limit
-    if (inputTokens <= config.contextLimitThreshold) {
-        console.log(`Recursion depth ${currentDepth}: Text fits (${inputTokens} tokens). Performing final summarization.`);
-        return await summarizeChunk(textToReduce, llmClient, config, finalPrompt);
-    }
-    
-    // Too deep in recursion, truncate
-    if (currentDepth >= config.recursionLimit) {
-        console.warn(`Max recursion depth (${config.recursionLimit}) reached. Truncating text.`);
-        const truncatedText = textToReduce.slice(0, config.contextLimitThreshold * 4); // Approximate 4 chars per token
-        return await summarizeChunk(truncatedText, llmClient, config, finalPrompt);
-    }
-    
-    // Recursive case: Text too long, chunk it
-    console.log(`Recursion depth ${currentDepth}: Text too long (${inputTokens} tokens). Re-chunking...`);
-    const chunks = createChunksWithOverlap(textToReduce, config.chunkSize, config.overlapSize);
-    
-    // Summarize each chunk with intermediate prompt
-    const intermediatePrompt = "Summarize the key points of this text segment:";
-    const chunkSummaries = [];
-    
-    for (let i = 0; i < chunks.length; i++) {
-        const summary = await summarizeChunk(chunks[i], llmClient, config, intermediatePrompt);
-        if (!summary.startsWith('Error summarizing:')) {
-            chunkSummaries.push(summary);
-        }
-    }
-    
-    if (chunkSummaries.length === 0) {
-        throw new Error('All chunk summarizations failed.');
-    }
-    
-    // Combine summaries and recurse
-    const combinedText = chunkSummaries.join('\n\n');
-    return recursiveReduce(combinedText, llmClient, config, finalPrompt, currentDepth + 1);
-}
-
-/**
- * Main summarization function
+ * Performs recursive MapReduce-like summarization for long texts
  * 
  * @param {string} text - Text to summarize
  * @param {Object} llmClient - LLM client (Vertex or Ollama)
  * @param {Object} config - Configuration options
+ * @param {string} prompt - System prompt for summarization
+ * @param {number} recursionLevel - Current recursion level
  * @returns {Promise<string>} - Summarized text
  */
-async function summarizeText(text, llmClient, config = {}) {
-    // Merge with defaults
-    const fullConfig = { ...DEFAULT_CONFIG, ...config };
+async function recursiveSummarize(text, llmClient, config, prompt, recursionLevel = 0) {
+    // Use defaults if config not provided
+    const actualConfig = { ...DEFAULT_CONFIG, ...config };
     
-    if (!text || text.trim() === '') {
-        throw new Error('Input text cannot be empty');
+    // Check if text is small enough to send to LLM directly
+    if (estimateTokenCount(text) <= actualConfig.contextLimitThreshold) {
+        return await summarizeChunk(text, llmClient, actualConfig, prompt);
     }
     
-    const inputTokens = estimateTokenCount(text);
-    console.log(`Input text estimated tokens: ${inputTokens}`);
-    
-    // Direct summarization for short text
-    if (inputTokens <= fullConfig.contextLimitThreshold) {
-        console.log('Input text is within context limit. Summarizing directly.');
-        const systemPrompt = "Summarize the following text concisely, preserving key information:";
-        return await summarizeChunk(text, llmClient, fullConfig, systemPrompt);
+    // Check recursion limit
+    if (recursionLevel >= actualConfig.recursionLimit) {
+        console.warn(`Reached recursion limit (${actualConfig.recursionLimit}), truncating text`);
+        // Truncate text to fit context limit
+        const truncatedText = text.slice(0, actualConfig.contextLimitThreshold * 4);
+        return await summarizeChunk(truncatedText, llmClient, actualConfig, prompt);
     }
     
-    // MapReduce for long text
-    console.log('Input text exceeds context limit. Using chunking...');
+    // Create chunks with overlap
+    const chunks = createChunksWithOverlap(text, actualConfig.chunkSize, actualConfig.overlapSize);
+    console.log(`Split text into ${chunks.length} chunks for level ${recursionLevel}`);
     
-    // 1. Create chunks
-    const chunks = createChunksWithOverlap(text, fullConfig.chunkSize, fullConfig.overlapSize);
-    console.log(`Created ${chunks.length} chunks.`);
-    
-    // 2. Summarize each chunk (Map)
-    const chunkPrompt = "Summarize the key points of this text segment:";
-    const chunkSummaries = [];
-    
+    // MAP: Summarize each chunk
+    const summaries = [];
     for (let i = 0; i < chunks.length; i++) {
-        console.log(`Processing chunk ${i+1}/${chunks.length}...`);
-        const summary = await summarizeChunk(chunks[i], llmClient, fullConfig, chunkPrompt);
-        if (!summary.startsWith('Error summarizing:')) {
-            chunkSummaries.push(summary);
-        }
+        console.log(`Processing chunk ${i+1}/${chunks.length} at level ${recursionLevel}`);
+        const summary = await summarizeChunk(chunks[i], llmClient, actualConfig, prompt);
+        summaries.push(summary);
     }
     
-    if (chunkSummaries.length === 0) {
-        throw new Error('All chunk summarizations failed.');
+    // REDUCE: Combine summaries recursively
+    const combinedSummaries = summaries.join('\n\n');
+    
+    // If combined summaries are still too large, recurse
+    if (estimateTokenCount(combinedSummaries) > actualConfig.contextLimitThreshold) {
+        console.log(`Combined summaries still too large (${estimateTokenCount(combinedSummaries)} tokens), recursing to level ${recursionLevel + 1}`);
+        return await recursiveSummarize(
+            combinedSummaries,
+            llmClient,
+            actualConfig,
+            `Please create a high-level summary of these summaries:\n\n${prompt}`,
+            recursionLevel + 1
+        );
     }
     
-    // 3. Combine chunk summaries
-    const combinedSummaryText = chunkSummaries.join('\n\n');
-    const combinedTokens = estimateTokenCount(combinedSummaryText);
-    console.log(`Combined ${chunkSummaries.length} chunk summaries. Combined tokens: ${combinedTokens}`);
-    
-    // 4. Reduce combined summaries
-    const finalPrompt = "Synthesize the following summaries into a single, coherent summary:";
-    const finalSummary = await recursiveReduce(
-        combinedSummaryText, 
-        llmClient, 
-        fullConfig, 
-        finalPrompt
-    );
-    
-    const outputTokens = estimateTokenCount(finalSummary);
-    console.log(`Chunked Summarization stats: Input=${inputTokens} tokens, Output=${outputTokens} tokens`);
-    
-    return finalSummary;
+    // Final summary of combined summaries
+    return await summarizeChunk(combinedSummaries, llmClient, actualConfig, 
+        `Please create a final coherent summary of these section summaries:\n\n${prompt}`);
 }
 
-// Analyze a directory of JavaScript files
-async function summarizeDirectory(dirPath, llmClient, config = {}) {
-    // Create a recursive function to read all files in a directory
-    async function readFilesRecursively(dir) {
-        const allFiles = [];
-        const entries = await fs.readdir(dir, { withFileTypes: true });
+/**
+ * Main function to summarize text
+ * 
+ * @param {string} text - Text to summarize
+ * @param {Object} llmClient - LLM client (Vertex or Ollama)
+ * @param {Object} config - Configuration options
+ * @param {string} prompt - System prompt
+ * @returns {Promise<string>} - Summarized text
+ */
+export async function summarizeText(text, llmClient, config = {}, prompt = 'Please summarize this text:') {
+    return recursiveSummarize(text, llmClient, config, prompt);
+}
+
+/**
+ * Summarize all files in a directory
+ * 
+ * @param {string} directory - Directory containing files to summarize
+ * @param {Object} llmClient - LLM client (Vertex or Ollama)
+ * @param {Object} config - Configuration options
+ * @param {string} customPrompt - Optional custom prompt
+ * @returns {Promise<string>} - Combined summary
+ */
+export async function summarizeDirectory(directory, llmClient, config = {}, customPrompt = null) {
+    try {
+        // Get all files in directory
+        const files = await fs.readdir(directory);
+        const jsFiles = files.filter(file => file.endsWith('.js'));
         
-        for (const entry of entries) {
-            const fullPath = path.join(dir, entry.name);
-            
-            if (entry.isDirectory()) {
-                const subDirFiles = await readFilesRecursively(fullPath);
-                allFiles.push(...subDirFiles);
-            } else if (entry.name.endsWith('.js')) {
-                allFiles.push(fullPath);
-            }
+        if (jsFiles.length === 0) {
+            return 'No JavaScript files found in directory';
         }
         
-        return allFiles;
-    }
-    
-    // Get all JavaScript files
-    const files = await readFilesRecursively(dirPath);
-    console.log(`Found ${files.length} JavaScript files in ${dirPath}`);
-    
-    // Group files by directory
-    const filesByDir = {};
-    for (const file of files) {
-        const dir = path.dirname(file);
-        if (!filesByDir[dir]) {
-            filesByDir[dir] = [];
-        }
-        filesByDir[dir].push(file);
-    }
-    
-    // Analyze each directory
-    const dirSummaries = {};
-    for (const [dir, dirFiles] of Object.entries(filesByDir)) {
-        // Read and concatenate files
+        console.log(`Found ${jsFiles.length} JavaScript files in ${directory}`);
+        
+        // Create prompt based on directory type
+        const dirType = path.basename(directory);
+        const prompt = customPrompt || `Please analyze these ${dirType} and explain their purpose, patterns, and relationships:`;
+        
+        // Read and combine all files
         let combinedContent = '';
-        for (const file of dirFiles) {
+        for (const file of jsFiles) {
+            const filePath = path.join(directory, file);
             try {
-                const content = await fs.readFile(file, 'utf8');
-                combinedContent += `// File: ${path.basename(file)}\n${content}\n\n`;
-            } catch (error) {
-                console.error(`Error reading ${file}: ${error.message}`);
+                const content = await fs.readFile(filePath, 'utf8');
+                // Add file separator with name for context
+                combinedContent += `\n\n--- File: ${file} ---\n\n${content}`;
+            } catch (err) {
+                console.error(`Error reading ${filePath}: ${err.message}`);
             }
         }
         
-        // Skip empty directories
-        if (!combinedContent.trim()) {
-            continue;
+        // Check if size exceeds chunking threshold
+        const estimatedTokens = estimateTokenCount(combinedContent);
+        console.log(`Input text estimated tokens: ${estimatedTokens}`);
+        
+        if (estimatedTokens > DEFAULT_CONFIG.contextLimitThreshold) {
+            console.log(`Input text exceeds context limit. Using chunking...`);
+            // Use recursive chunking for large combined content
+            return await recursiveSummarize(combinedContent, llmClient, config, prompt);
+        } else {
+            // Small enough for direct summarization
+            return await summarizeChunk(combinedContent, llmClient, config, prompt);
         }
         
-        // Summarize combined content
-        try {
-            const dirPrompt = `Analyze this directory of JavaScript files. Explain the purpose of the files and how they work together:`;
-            const summary = await summarizeText(combinedContent, llmClient, {
-                ...config,
-                systemPrompt: dirPrompt
-            });
-            dirSummaries[dir] = summary;
-        } catch (error) {
-            console.error(`Error summarizing ${dir}: ${error.message}`);
-            dirSummaries[dir] = `Error: ${error.message}`;
-        }
+    } catch (error) {
+        console.error(`Error summarizing directory: ${error.message}`);
+        return `ERROR: ${error.message}`;
     }
-    
-    return dirSummaries;
 }
-
-// Export functions
-module.exports = {
-    summarizeText,
-    summarizeChunk,
-    summarizeDirectory,
-    estimateTokenCount,
-    createChunksWithOverlap
-};

@@ -44,33 +44,59 @@
  */
 
 // Node.js built-in modules
-const fs = require('fs').promises; // Async file operations (Python: asyncio.open)
-const path = require('path'); // Path manipulation (Python: os.path)
+import { promises as fs } from 'fs'; // Async file operations (Python: asyncio.open)
+import path from 'path'; // Path manipulation (Python: os.path)
+import { fileURLToPath } from 'url';
+
+// Define __dirname equivalent for ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Load environment variables first, so they're available for constants
-require('dotenv').config({ path: path.join(__dirname, '../configs/.env') }); // Load .env variables (Python: python-dotenv)
-const prettier = require('prettier'); // Code formatting
-const webcrack = require('webcrack'); // Deobfuscation
-const Parser = require('tree-sitter'); // AST parsing
-const JavaScript = require('tree-sitter-javascript'); // JavaScript grammar for Tree-sitter
-const { ChatVertexAI } = require('@langchain/google-vertexai'); // Vertex AI LLM calls
-const ollama = require('ollama'); // Ollama LLM for local models
-const yargs = require('yargs'); // CLI argument parsing (Python: argparse)
+import dotenv from 'dotenv';
+dotenv.config({ path: path.join(__dirname, '../configs/.env') }); // Load .env variables (Python: python-dotenv)
+
+import prettier from 'prettier'; // Code formatting
+import * as webcrack from 'webcrack'; // Deobfuscation
+import Parser from 'tree-sitter'; // AST parsing
+import JavaScript from 'tree-sitter-javascript'; // JavaScript grammar for Tree-sitter
+import { ChatVertexAI } from '@langchain/google-vertexai'; // Vertex AI LLM calls
+import ollama from 'ollama'; // Ollama LLM for local models
+import yargs from 'yargs/yargs'; // CLI argument parsing (Python: argparse)
+import { hideBin } from 'yargs/helpers';
 
 // Local modules
-const { sanitizeFilename, createFilePath, formatCodeWithComments } = require('./utils/helpers');
-const { summarizeText, summarizeDirectory } = require('./utils/rolling_window_summarizer');
+import { sanitizeFilename, createFilePath, formatCodeWithComments } from './utils/helpers.js';
+import { summarizeText, summarizeDirectory } from './utils/rolling_window_summarizer.js';
+import { deobfuscateJavaScript, createGeminiClient, saveDeobfuscationResults } from './utils/deobfuscator.js';
 
 // Initialize Tree-sitter parser
 const parser = new Parser();
 parser.setLanguage(JavaScript);
 
+// LLM configuration defined first so it's available for defaults
+const LLM_PROVIDER = process.env.LLM_PROVIDER || 'vertex'; // 'vertex' or 'ollama'
+
+// Chunking configuration
+const CHUNK_SIZE_KB = parseInt(process.env.CHUNK_SIZE_KB || '240'); // Default to 240KB chunks
+process.env.CHUNK_SIZE_KB = CHUNK_SIZE_KB.toString(); // Ensure the chunker utility sees it
+
+// Vertex AI model configuration
+const VERTEX_AI_MODEL = process.env.VERTEX_AI_MODEL || 'gemini-2.5-flash-preview-04-17';
+const VERTEX_AI_LOCATION = process.env.VERTEX_AI_LOCATION || 'us-central1';
+const VERTEX_AI_MAX_OUTPUT_TOKENS = parseInt(process.env.VERTEX_AI_MAX_OUTPUT_TOKENS || '1000');
+
+// Ollama model configuration
+const OLLAMA_HOST = process.env.OLLAMA_HOST || 'http://localhost:11435';
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen3:30b-a3b-q8_0';
+const OLLAMA_MAX_TOKENS = parseInt(process.env.OLLAMA_MAX_TOKENS || '1000');
+
 // Define defaults for CLI arguments
-const DEFAULT_LLM_PROVIDER = process.env.LLM_PROVIDER || 'vertex';
-const DEFAULT_OLLAMA_HOST = process.env.OLLAMA_HOST || 'http://localhost:11435';
+const DEFAULT_LLM_PROVIDER = LLM_PROVIDER;
+const DEFAULT_OLLAMA_HOST = OLLAMA_HOST;
 
 // Parse CLI arguments with yargs
-const argv = yargs
+const argv = yargs(hideBin(process.argv))
     .usage('Usage: node $0 <input_file> [--output-dir <path>] [--skip-llm] [--llm-provider <provider>] [--llm-model <model>]')
     .demandCommand(1, 'You must provide an input JavaScript file.')
     .option('output-dir', {
@@ -81,6 +107,11 @@ const argv = yargs
     .option('skip-llm', {
         type: 'boolean',
         description: 'Skip the LLM analysis step',
+        default: false,
+    })
+    .option('use-gemini-deobfuscator', {
+        type: 'boolean',
+        description: 'Use Gemini API to deobfuscate JavaScript before processing',
         default: false,
     })
     .option('llm-provider', {
@@ -124,6 +155,21 @@ if (outputDir === 'output/deconstructed_output') {
 
 // Create enhanced metadata file to track analysis information
 const startTime = new Date(); // Track start time for entire process
+
+// Handle input file stats
+let inputStats = null;
+try {
+    const stats = await fs.stat(inputFile);
+    inputStats = {
+        size: stats.size,
+        modified: stats.mtime.toISOString(),
+        created: stats.birthtime.toISOString()
+    };
+} catch (error) {
+    console.warn(`Could not read input file stats: ${error.message}`);
+}
+
+// Create metadata object after all paths are established
 const metadataObj = {
     // Timestamps for tracking
     created: startTime.toISOString(),
@@ -134,7 +180,7 @@ const metadataObj = {
     // Input file info
     inputFile: inputFile,
     inputBaseName: inputBaseName,
-    inputStats: null, // Will be filled with file stats
+    inputStats: inputStats, // Added earlier
     
     // Process configuration
     version: '1.0.0', // Pipeline version
@@ -147,6 +193,7 @@ const metadataObj = {
     // Process timing for each step
     steps: {
         prettier: { started: null, completed: null, duration: null },
+        geminiDeobfuscation: { started: null, completed: null, duration: null },
         webcrack: { started: null, completed: null, duration: null },
         treeSitter: { started: null, completed: null, duration: null },
         jsDoc: { started: null, completed: null, duration: null },
@@ -154,18 +201,9 @@ const metadataObj = {
         llmAnalysis: { started: null, completed: null, duration: null }
     },
     
-    // Output structure
+    // Output directory info - will be updated after paths are created
     outputDir: outputDir,
-    outputStructure: {
-        raw: {
-            prettier: prettierOutput,
-            webcrack: webcrackOutput,
-            treeSitter: treeSitterOutputDir
-        },
-        analysis: null, // Will be filled with analysis files
-        metadata: null, // Will be filled with metadata file paths
-        summaries: null // Will be filled with summary file paths
-    },
+    outputStructure: null, // Will be set after directory paths are created
     
     // Stats for tracking (will be filled during processing)
     stats: {
@@ -173,18 +211,6 @@ const metadataObj = {
         typeBreakdown: {}
     }
 };
-
-// Get input file stats
-try {
-    const stats = await fs.stat(inputFile);
-    metadataObj.inputStats = {
-        size: stats.size,
-        modified: stats.mtime.toISOString(),
-        created: stats.birthtime.toISOString()
-    };
-} catch (error) {
-    console.warn(`Could not read input file stats: ${error.message}`);
-}
 
 // Create standardized output structure with subdirectories
 const rawDir = path.join(outputDir, 'raw');
@@ -199,7 +225,12 @@ const treeSitterOutputDir = path.join(rawDir, '3_minified_tree_sitter');
 
 // Update metadata with directory structure
 metadataObj.outputStructure = {
-    raw: rawDir,
+    raw: {
+        dir: rawDir,
+        prettier: prettierOutput,
+        webcrack: webcrackOutput,
+        treeSitter: treeSitterOutputDir
+    },
     analysis: analysisDir,
     metadata: metadataDir,
     summaries: summariesDir
@@ -222,20 +253,7 @@ async function loadCredentials() {
     }
 }
 
-// LLM configuration defined here after loading .env file above
-
-// LLM configuration 
-const LLM_PROVIDER = process.env.LLM_PROVIDER || 'vertex'; // 'vertex' or 'ollama'
-
-// Vertex AI model configuration
-const VERTEX_AI_MODEL = process.env.VERTEX_AI_MODEL || 'gemini-2.5-flash-preview-04-17';
-const VERTEX_AI_LOCATION = process.env.VERTEX_AI_LOCATION || 'us-central1';
-const VERTEX_AI_MAX_OUTPUT_TOKENS = parseInt(process.env.VERTEX_AI_MAX_OUTPUT_TOKENS || '1000');
-
-// Ollama model configuration
-const OLLAMA_HOST = process.env.OLLAMA_HOST || 'http://localhost:11435';
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'qwen3:30b-a3b-q8_0';
-const OLLAMA_MAX_TOKENS = parseInt(process.env.OLLAMA_MAX_TOKENS || '1000');
+// LLM configuration loaded earlier to be available for constants
 
 // Initialize LLM model - will be configured based on provider
 let llmModel;
@@ -1344,18 +1362,124 @@ await fs.mkdir(summariesDir, { recursive: true });
         
         // Run steps
         const prettierCode = await runPrettier(inputFile, prettierOutput);
-        const webcrackCode = await runWebcrack(prettierOutput, webcrackOutput);
+        
+        // Add Gemini-based deobfuscation if requested
+        let preprocessedCode = prettierCode;
+        if (argv.useGeminiDeobfuscator) {
+            console.log('Using Gemini-based deobfuscation...');
+            
+            // Update metadata to track Gemini deobfuscation
+            if (!metadataObj.steps.geminiDeobfuscation) {
+                metadataObj.steps.geminiDeobfuscation = { started: null, completed: null, duration: null };
+            }
+            
+            // Track step timing in metadata
+            metadataObj.steps.geminiDeobfuscation.started = new Date().toISOString();
+            const startTime = Date.now();
+            
+            try {
+                // Create Gemini client
+                const geminiClient = createGeminiClient(argv.llmModel || VERTEX_AI_MODEL);
+                
+                // Create intermediate file paths
+                const geminiOutputPath = path.join(rawDir, '1a_minified_gemini_deobfuscated.js');
+                
+                // Run deobfuscation
+                console.log(`Deobfuscating with Gemini AI...`);
+                const deobfuscationResult = await deobfuscateJavaScript(prettierOutput, geminiClient);
+                
+                // Save results
+                const { deobfuscatedPath, mappingPath } = await saveDeobfuscationResults(
+                    prettierOutput, 
+                    deobfuscationResult.deobfuscatedCode,
+                    deobfuscationResult.nameMap,
+                    rawDir
+                );
+                
+                console.log(`Saved Gemini deobfuscated code to ${deobfuscatedPath}`);
+                console.log(`Saved name mappings to ${mappingPath}`);
+                
+                // Use deobfuscated code for next steps
+                preprocessedCode = deobfuscationResult.deobfuscatedCode;
+                
+                // Update metadata with step completion
+                const endTime = Date.now();
+                const duration = endTime - startTime;
+                metadataObj.steps.geminiDeobfuscation.completed = new Date().toISOString();
+                metadataObj.steps.geminiDeobfuscation.duration = {
+                    milliseconds: duration,
+                    seconds: Math.round(duration / 1000),
+                    formatted: `${Math.floor(duration / 1000)}s ${duration % 1000}ms`
+                };
+                
+                // Update metadata file immediately to track progress
+                await fs.writeFile(path.join(metadataDir, 'metadata.json'), JSON.stringify(metadataObj, null, 2));
+            } catch (error) {
+                console.error(`Gemini deobfuscation failed: ${error.message}`);
+                console.log('Falling back to prettier output for webcrack step');
+                
+                // Still update metadata with failure information
+                metadataObj.steps.geminiDeobfuscation.completed = new Date().toISOString();
+                metadataObj.steps.geminiDeobfuscation.error = error.message;
+                await fs.writeFile(path.join(metadataDir, 'metadata.json'), JSON.stringify(metadataObj, null, 2));
+            }
+        }
+        
+        // If we have preprocessed code from Gemini deobfuscation, write it to a temp file first
+        let webcrackInput = prettierOutput;
+        if (preprocessedCode !== prettierCode) {
+            const tempPreprocessedPath = path.join(rawDir, '1a_minified_preprocessed.js');
+            await fs.writeFile(tempPreprocessedPath, preprocessedCode);
+            webcrackInput = tempPreprocessedPath;
+        }
+        
+        const webcrackCode = await runWebcrack(webcrackInput, webcrackOutput);
         const chunks = await runTreeSitter(webcrackCode, treeSitterOutputDir);
         await addJSDocComments(treeSitterOutputDir);
         await generateDependencyGraph(treeSitterOutputDir, path.join(analysisDir, 'dependency_graph.json'));
-        // Path for sourcemap - could be in output directory or tree-sitter output directory
-        // Try both locations to handle potential variations in file location
+        // Path for sourcemap - could be in various locations
+        // Try to find the sourcemap in different locations
         let sourcemapPath;
-        try {
-            await fs.access(path.join(outputDir, 'sourcemap.json'));
-            sourcemapPath = path.join(outputDir, 'sourcemap.json');
-        } catch {
-            sourcemapPath = path.join(path.dirname(outputDir), 'sourcemap.json');
+        const possiblePaths = [
+            path.join(outputDir, 'sourcemap.json'),
+            path.join(path.dirname(outputDir), 'sourcemap.json'),
+            path.join(analysisDir, 'sourcemap.json'),
+            path.join(rawDir, 'sourcemap.json')
+        ];
+        
+        for (const potentialPath of possiblePaths) {
+            try {
+                await fs.access(potentialPath);
+                sourcemapPath = potentialPath;
+                console.log(`Found sourcemap at: ${sourcemapPath}`);
+                break;
+            } catch (error) {
+                // Continue checking other paths
+            }
+        }
+        
+        // If sourcemap not found, create a copy in the analysis directory to be safe
+        if (!sourcemapPath) {
+            console.log('Sourcemap not found in expected locations, checking 3_minified_tree_sitter directory');
+            try {
+                // Look for it in the tree-sitter output directory
+                const treeSourcemap = path.join(treeSitterOutputDir, 'sourcemap.json');
+                await fs.access(treeSourcemap);
+                
+                // Copy it to the analysis directory
+                await fs.copyFile(treeSourcemap, path.join(analysisDir, 'sourcemap.json'));
+                sourcemapPath = path.join(analysisDir, 'sourcemap.json');
+                console.log(`Copied sourcemap to: ${sourcemapPath}`);
+            } catch (error) {
+                // Create a basic sourcemap if none exists
+                console.warn('No sourcemap found, creating a minimal version for analysis');
+                const basicSourcemap = { 
+                    originalFile: path.basename(inputFile),
+                    chunks: []
+                };
+                await fs.writeFile(path.join(analysisDir, 'sourcemap.json'), JSON.stringify(basicSourcemap, null, 2));
+                sourcemapPath = path.join(analysisDir, 'sourcemap.json');
+            }
         }
         
         const dependencyGraphPath = path.join(outputDir, 'dependency_graph.json');

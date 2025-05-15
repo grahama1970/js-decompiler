@@ -205,12 +205,12 @@ The following Mermaid chart illustrates the pipeline's top-down workflow, showin
 
 ```mermaid
 graph TD
-    A[📄 Input File<br>input/cli.js] -->|Minified JS| B[🖌️ Prettier]
-    B -->|Formatted Code| C[🔍 Webcrack]
-    C -->|Deobfuscated Code| D[🌳 Tree-sitter]
-    D -->|Modular Files| E1[Directory Analysis]
-    D --> E2[Category Analysis]
-    E1 -->|Per-directory Summaries| F[📂 Output<br>output/{filename}_{timestamp}/]
+    A["📄 Input File<br>input/cli.js"] -->|Minified JS| B["🖌️ Prettier"]
+    B -->|Formatted Code| C["🔍 Webcrack"]
+    C -->|Deobfuscated Code| D["🌳 Tree-sitter"]
+    D -->|Modular Files| E1["Directory Analysis"]
+    D --> E2["Category Analysis"]
+    E1 -->|Per-directory Summaries| F["📂 Output<br>output/{filename}_{timestamp}"]
     E2 -->|Comprehensive Analysis| F
     
     classDef pipeline fill:#4B8BBE,stroke:#333,stroke-width:2px,color:#FFF;

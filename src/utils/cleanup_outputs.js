@@ -13,8 +13,8 @@
  * - Keeps at least N directories per input file
  */
 
-const fs = require('fs').promises;
-const path = require('path');
+import { promises as fs } from 'fs';
+import path from 'path';
 
 /**
  * Lists output directories with their metadata, sorted by specified criteria
@@ -112,13 +112,15 @@ async function listOutputDirectories(outputDir = 'output', options = {}) {
     }
     
     // Filter by completion status if requested
+    let filteredDirs = [...dirStats];
+    
     if (options.completedOnly) {
-        dirStats = dirStats.filter(dir => dir.metadata && dir.metadata.completed === true);
+        filteredDirs = filteredDirs.filter(dir => dir.metadata && dir.metadata.completed === true);
     }
 
     // Filter by input file if requested
     if (options.inputFilter) {
-        dirStats = dirStats.filter(dir => {
+        filteredDirs = filteredDirs.filter(dir => {
             const inputFile = dir.metadata && dir.metadata.inputBaseName;
             return inputFile && inputFile.includes(options.inputFilter);
         });
@@ -127,22 +129,22 @@ async function listOutputDirectories(outputDir = 'output', options = {}) {
     // Sort based on criteria
     switch (options.sortBy) {
         case 'size':
-            dirStats.sort((a, b) => b.size - a.size);
+            filteredDirs.sort((a, b) => b.size - a.size);
             break;
         case 'input':
             // Sort by input file name, then by date
-            dirStats.sort((a, b) => {
+            filteredDirs.sort((a, b) => {
                 const fileA = (a.metadata && a.metadata.inputBaseName) || '';
                 const fileB = (b.metadata && b.metadata.inputBaseName) || '';
                 return fileA.localeCompare(fileB) || b.created - a.created;
             });
             break;
         default: // 'date' is default
-            dirStats.sort((a, b) => b.created - a.created);
+            filteredDirs.sort((a, b) => b.created - a.created);
             break;
     }
     
-    return dirStats;
+    return filteredDirs;
 }
 
 /**
@@ -304,9 +306,6 @@ async function main() {
         console.log(`Keeping at least ${keepMinPerInput} newest directories per input file.`);
         console.log(`${keepCompleted ? 'Keeping' : 'Allowing deletion of'} completed runs.`);
         
-        const keepMinPerInput = parseInt(args.find(a => a.startsWith('--keep-per-input='))?.split('=')[1] || '2', 10);
-        const keepCompleted = !args.includes('--allow-delete-completed');
-        
         const result = await cleanupOldDirectories('output', { 
             olderThan, 
             dryRun, 
@@ -368,14 +367,14 @@ Options for cleanup:
 }
 
 // Run main when executed directly
-if (require.main === module) {
+if (import.meta.url === `file://${process.argv[1]}`) {
     main().catch(error => {
         console.error('Error:', error);
         process.exit(1);
     });
 }
 
-module.exports = {
+export {
     listOutputDirectories,
     cleanupOldDirectories
 };

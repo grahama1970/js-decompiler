@@ -7,9 +7,9 @@
  * @param {string} name - The string to sanitize
  * @returns {string} Sanitized filename
  */
-exports.sanitizeFilename = (name) => {
+export function sanitizeFilename(name) {
   return name.replace(/[^a-zA-Z0-9_]/g, '_').replace(/^_+|_+$/g, '') || 'unnamed';
-};
+}
 
 /**
  * Creates a readable file path for output files
@@ -18,10 +18,10 @@ exports.sanitizeFilename = (name) => {
  * @param {string} name - The file name
  * @returns {string} The full file path
  */
-exports.createFilePath = (outputDir, type, name) => {
-  const sanitizedName = exports.sanitizeFilename(name);
+export function createFilePath(outputDir, type, name) {
+  const sanitizedName = sanitizeFilename(name);
   return `${outputDir}/${type}s/${sanitizedName}.js`;
-};
+}
 
 /**
  * Formats a code chunk with appropriate comments
@@ -30,20 +30,22 @@ exports.createFilePath = (outputDir, type, name) => {
  * @param {string} originalFile - The name of the original file
  * @returns {string} Formatted code with comments
  */
-exports.formatCodeWithComments = (code, chunk, originalFile) => {
+export function formatCodeWithComments(code, chunk, originalFile) {
   return `// ${chunk.type}: ${chunk.name}\n// Lines ${chunk.startLine}-${chunk.endLine} from ${originalFile}\n\n${code}`;
-};
+}
 
 // Run validation when this file is executed directly
-if (require.main === module) {
-  const assert = require('assert');
+if (import.meta.url === `file://${process.argv[1]}`) {
   const results = [];
+  
+  // Use dynamic import for assert (needed for top-level validation)
+  const { default: assert } = await import('assert');
   
   // Test sanitizeFilename
   try {
-    assert.strictEqual(exports.sanitizeFilename('test-file.js'), 'test_file_js');
-    assert.strictEqual(exports.sanitizeFilename('____test____'), 'test');
-    assert.strictEqual(exports.sanitizeFilename(''), 'unnamed');
+    assert.strictEqual(sanitizeFilename('test-file.js'), 'test_file_js');
+    assert.strictEqual(sanitizeFilename('____test____'), 'test');
+    assert.strictEqual(sanitizeFilename(''), 'unnamed');
     results.push('✅ sanitizeFilename tests passed');
   } catch (error) {
     results.push(`❌ sanitizeFilename test failed: ${error.message}`);
@@ -52,7 +54,7 @@ if (require.main === module) {
   // Test createFilePath
   try {
     assert.strictEqual(
-      exports.createFilePath('/output', 'function', 'test-func'),
+      createFilePath('/output', 'function', 'test-func'),
       '/output/functions/test_func.js'
     );
     results.push('✅ createFilePath tests passed');
@@ -70,7 +72,7 @@ if (require.main === module) {
     };
     const code = 'function testFunc() {\n  return true;\n}';
     const expected = '// function: testFunc\n// Lines 10-20 from original.js\n\nfunction testFunc() {\n  return true;\n}';
-    assert.strictEqual(exports.formatCodeWithComments(code, chunk, 'original.js'), expected);
+    assert.strictEqual(formatCodeWithComments(code, chunk, 'original.js'), expected);
     results.push('✅ formatCodeWithComments tests passed');
   } catch (error) {
     results.push(`❌ formatCodeWithComments test failed: ${error.message}`);
