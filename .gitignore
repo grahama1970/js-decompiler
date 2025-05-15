@@ -1,0 +1,44 @@
+# Dependency directories
+node_modules/
+ 
+# Logs
+npm-debug.log
+yarn-error.log
+
+# Environment variables and secrets
+.env
+**/.env
+.env.local
+.env.*
+# Explicitly ignore service account files
+configs/*_service_account.json
+configs/vertex_ai_service_account.json
+vertex_ai_service_account.json
+**/vertex_ai_service_account.json
+# Any files containing secrets, tokens or keys
+**/*_key.json
+**/*_token.json
+**/*_secret.json
+**/*credentials*.json
+**/*credential*.json
+**/*.pem
+**/*.key
+
+# Output directories
+output/
+**/deconstructed_output/
+archive/
+
+# Coverage directory used by tools like istanbul
+coverage/
+
+# Editor directories and files
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+*.sublime-workspace
+
+# Jest cache
+.jest/
