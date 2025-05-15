@@ -102,7 +102,12 @@ async function loadCredentials() {
     }
 }
 
-// Initialize Vertex AI model - will be properly configured in runPipeline()
+// Vertex AI model configuration
+const VERTEX_AI_MODEL = process.env.VERTEX_AI_MODEL || 'gemini-2.5-flash-preview-04-17';
+const VERTEX_AI_LOCATION = process.env.VERTEX_AI_LOCATION || 'us-central1';
+const VERTEX_AI_MAX_OUTPUT_TOKENS = parseInt(process.env.VERTEX_AI_MAX_OUTPUT_TOKENS || '1000');
+
+// Initialize Vertex AI model - will be configured when credentials are loaded
 let vertexModel;
 
 // Validate input file
@@ -428,13 +433,13 @@ async function runPipeline() {
         // Load credentials
         vertexCredentials = await loadCredentials();
         
-        // Initialize Vertex AI model with the loaded credentials
+        // Initialize Vertex AI model with the loaded credentials and configuration
         vertexModel = new ChatVertexAI({
-            model: 'gemini-1.5-pro', // or 'gemini-pro'
+            model: VERTEX_AI_MODEL,
             projectId: vertexCredentials?.project_id || 'your-project-id',
-            location: 'us-central1', // Replace with your region
+            location: VERTEX_AI_LOCATION,
             credentials: vertexCredentials,
-            maxOutputTokens: 1000,
+            maxOutputTokens: VERTEX_AI_MAX_OUTPUT_TOKENS,
         });
         
         // Validate input
