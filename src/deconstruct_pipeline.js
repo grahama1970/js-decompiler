@@ -467,7 +467,7 @@ async function runPipeline() {
 // Generate README.md
 async function generateReadme() {
     const readmeContent = `
-# JavaScript Deconstruction Pipeline
+# JavaScript Decompiler
 
 **Note**: This is an experimental tool for analyzing minified JavaScript files. It processes a minified .js file (e.g., input/cli.js) for educational purposes only. Ensure you have permission to analyze the input file.
 

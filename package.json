@@ -1,5 +1,5 @@
 {
-    "name": "js-deconstruction-pipeline",
+    "name": "js-decompiler",
     "version": "1.0.0",
     "description": "Experimental script to deconstruct minified JavaScript files with LLM analysis",
     "main": "src/deconstruct_pipeline.js",

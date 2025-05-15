@@ -1,4 +1,4 @@
-# JSReverse: JavaScript Deconstruction Pipeline
+# JS-Decompiler: JavaScript Decompilation Pipeline
 
 **Note**: This is an experimental tool for analyzing minified JavaScript files, such as `input/cli.js`, for educational purposes only. Ensure you have permission to analyze the input file. ⚠️
 

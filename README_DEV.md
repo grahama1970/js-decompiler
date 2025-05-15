@@ -1,11 +1,11 @@
-# JSReverse Developer Guide
+# JS-Decompiler Developer Guide
 
-This document provides information for developers working on the JSReverse project.
+This document provides information for developers working on the JS-Decompiler project.
 
 ## Project Structure
 
 ```
-jsreverse/
+js-decompiler/
 ├── src/                          # Source code
 │   ├── deconstruct_pipeline.js   # Main script
 │   └── utils/                    # Utility modules
