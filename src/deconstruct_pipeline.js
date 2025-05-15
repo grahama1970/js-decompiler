@@ -47,7 +47,7 @@ const path = require('path'); // Path manipulation (Python: os.path)
 // External npm modules
 require('dotenv').config({ path: path.join(__dirname, '../configs/.env') }); // Load .env variables (Python: python-dotenv)
 const prettier = require('prettier'); // Code formatting
-const { deobfuscate } = require('webcrack'); // Deobfuscation
+const webcrack = require('webcrack'); // Deobfuscation
 const Parser = require('tree-sitter'); // AST parsing
 const JavaScript = require('tree-sitter-javascript'); // JavaScript grammar for Tree-sitter
 const { ChatVertexAI } = require('@langchain/google-vertexai'); // Vertex AI LLM calls
@@ -123,7 +123,8 @@ async function validateInputFile(inputFile) {
 // Step 1: Run Prettier
 async function runPrettier(input, output) {
     const sourceCode = await fs.readFile(input, 'utf8');
-    const formattedCode = prettier.format(sourceCode, {
+    // Use prettier.format as a Promise
+    const formattedCode = await prettier.format(sourceCode, {
         parser: 'babel',
         semi: true,
         trailingComma: 'es5',
@@ -138,7 +139,7 @@ async function runPrettier(input, output) {
 // Step 2: Run Webcrack
 async function runWebcrack(input, output) {
     const sourceCode = await fs.readFile(input, 'utf8');
-    const result = await deobfuscate(sourceCode);
+    const result = await webcrack.webcrack(sourceCode);
     await fs.mkdir(path.dirname(output), { recursive: true });
     await fs.writeFile(output, result.code);
     console.log(`Saved ${output}`);
@@ -174,12 +175,25 @@ async function runTreeSitter(sourceCode, outputDir) {
     // Process a single node recursively
     function processNode(node, depth = 0, parentName = '') {
         const type = nodeTypes[node.type] || 'other';
-        let name = node.childForFieldName('name')?.text || '';
+        let name = '';
+        
+        // Find the name node based on node type
+        if (node.children && node.children.length > 0) {
+            if (node.type === 'function_declaration' || node.type === 'method_definition' || node.type === 'class_declaration') {
+                // For these node types, the name is usually the second child
+                const nameNode = node.children.find(child => child.type === 'identifier');
+                if (nameNode) name = nameNode.text;
+            }
+        }
 
         if (type === 'variable' || type === 'constant') {
             name = node.children
                 .filter((child) => child.type === 'variable_declarator')
-                .map((child) => child.childForFieldName('name')?.text)
+                .map((child) => {
+                    const nameNode = child.children?.find(n => n.type === 'identifier');
+                    return nameNode?.text;
+                })
+                .filter(Boolean)
                 .join('_') || 'anonymous';
         } else if (type === 'export' || type === 'import') {
             name = type + '_' + (node.children[1]?.type || 'default');
@@ -264,8 +278,9 @@ async function runTreeSitter(sourceCode, outputDir) {
             console.log(`Saved ${filename}`);
         }
 
+        const sourcemapPath = path.join(outputDir, 'sourcemap.json');
         await fs.writeFile(
-            path.join(outputDir, 'sourcemap.json'),
+            sourcemapPath,
             JSON.stringify(sourcemap, null, 2)
         );
         console.log(`Saved sourcemap.json`);
@@ -298,11 +313,17 @@ async function addJSDocComments(inputDir) {
         let newCode = code;
         for (const node of tree.rootNode.children) {
             if (node.type === 'function_declaration' || node.type === 'method_definition') {
-                const name = node.childForFieldName('name')?.text || 'anonymous';
-                const params = node.childForFieldName('parameters')?.children
-                    .filter((child) => child.type === 'identifier')
-                    .map((child) => child.text)
-                    .join(', ') || '';
+                // Get the function name
+                const nameNode = node.children?.find(child => child.type === 'identifier');
+                const name = nameNode?.text || 'anonymous';
+                
+                // Get parameters
+                const paramsNode = node.children?.find(child => child.type === 'formal_parameters');
+                const params = paramsNode?.children
+                    ?.filter((child) => child.type === 'identifier')
+                    ?.map((child) => child.text)
+                    ?.join(', ') || '';
+                
                 const jsdoc = `/**\n * Function ${name}\n * @param {any} ${params.split(', ').join('\n * @param {any} ')}\n * @returns {any}\n */\n`;
                 newCode = newCode.slice(0, node.startIndex) + jsdoc + newCode.slice(node.startIndex);
             }
@@ -334,14 +355,24 @@ async function generateDependencyGraph(inputDir, outputFile) {
         const tree = parser.parse(code);
         const name = path.basename(filePath, '.js');
         graph.nodes.push({ id: name, file: filePath });
-        tree.rootNode.walk().forEach((node) => {
+        // Recursively find identifiers in the node
+        function findIdentifiers(node) {
             if (node.type === 'identifier') {
                 const id = node.text;
                 if (files.some((f) => path.basename(f, '.js') === id)) {
                     graph.edges.push({ from: name, to: id });
                 }
             }
-        });
+            
+            if (node.children && node.children.length > 0) {
+                for (const child of node.children) {
+                    findIdentifiers(child);
+                }
+            }
+        }
+        
+        // Start the recursive search at the root node
+        findIdentifiers(tree.rootNode);
     }
 
     await fs.writeFile(outputFile, JSON.stringify(graph, null, 2));
@@ -454,10 +485,14 @@ async function runPipeline() {
         const chunks = await runTreeSitter(webcrackCode, treeSitterOutputDir);
         await addJSDocComments(treeSitterOutputDir);
         await generateDependencyGraph(treeSitterOutputDir, path.join(outputDir, 'dependency_graph.json'));
+        // Wait for file to be written before proceeding to next step
+        const sourcemapPath = path.join(treeSitterOutputDir, 'sourcemap.json');
+        const dependencyGraphPath = path.join(outputDir, 'dependency_graph.json');
+        
         await runLLMAnalysis(
             treeSitterOutputDir,
-            path.join(outputDir, 'sourcemap.json'),
-            path.join(outputDir, 'dependency_graph.json'),
+            sourcemapPath,
+            dependencyGraphPath,
             path.join(outputDir, 'llm_analysis.md'),
             chunks
         );
