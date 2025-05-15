@@ -3,6 +3,7 @@
     "version": "1.0.0",
     "description": "Experimental script to deconstruct minified JavaScript files with LLM analysis",
     "main": "src/deconstruct_pipeline.js",
+    "type": "module",
     "scripts": {
         "start": "node src/deconstruct_pipeline.js",
         "test": "jest",

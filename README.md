@@ -9,7 +9,8 @@ This script deconstructs a minified JavaScript file into modular components, cre
 1. **Prettier**: Formats code for readability.
 2. **Webcrack**: Deobfuscates variable names.
 3. **Tree-sitter**: Splits code into modular files (functions, classes, etc.).
-4. **Vertex AI**: Generates descriptions for each file using Google Vertex AI (via LangChain.js).
+4. **Directory Analysis**: Creates summaries for each component type.
+5. **Category Analysis**: Provides multi-faceted analysis using Vertex AI or Ollama.
 
 The goal is to reverse-engineer minified JavaScript, making it easier to understand its structure and functionality.
 
@@ -62,14 +63,17 @@ To learn how to break down a minified JavaScript file into manageable parts, app
 project-root/
 ├── src/                          # Source code
 │   ├── deconstruct_pipeline.js   # Main script
-│   └── utils/                   # Utility modules (optional)
+│   └── utils/                   # Utility modules
+│       ├── helpers.js           # Helper functions
+│       ├── rolling_window_summarizer.js  # Text summarization 
+│       └── cleanup_outputs.js   # Output management
 ├── config/                      # Configuration files
 │   ├── .env                     # Environment variables
 │   └── vertex_ai_service_account.json # Vertex AI credentials
 ├── input/                       # Input files
 │   └── cli.js                   # Example minified JS
 ├── output/                      # Output directory
-│   └── deconstructed_output/    # Generated files
+│   └── [timestamp directories]  # Generated analysis
 ├── tests/                       # Test files
 │   └── deconstruct_pipeline.test.js # Placeholder
 ├── .gitignore                   # Git ignore file
@@ -125,7 +129,7 @@ Place input files in `input/` (e.g., `input/cli.js`).
 
 ## 📤 Output Structure
 
-The script creates a directory (default: `output/deconstructed_output/`) with:
+The script creates a timestamped directory (default: `output/{filename}_{timestamp}/`) with:
 
 - `1_minified_prettier.js`: Formatted code.
 - `2_minified_webcrack.js`: Deobfuscated code.
@@ -139,13 +143,16 @@ The script creates a directory (default: `output/deconstructed_output/`) with:
   - `base/`: Miscellaneous code.
 - `sourcemap.json`: Maps files to original line numbers.
 - `dependency_graph.json`: File relationships.
-- `llm_analysis.md`: AI-generated descriptions for each file.
+- `*_summary.md`: Per-directory summaries for each component type.
+- `summaries/`: Individual category analysis files.
+- `llm_analysis.md`: Comprehensive LLM analysis of all code.
 - `README.md`: Output-specific documentation.
+- `metadata.json`: Information about this analysis run (timestamp, model, etc.).
 
 **Example**:
 
 ```
-output/deconstructed_output/
+output/cli_2023-05-15T10-15-30-456Z/
 ├── 1_minified_prettier.js
 ├── 2_minified_webcrack.js
 ├── 3_minified_tree_sitter/
@@ -156,34 +163,67 @@ output/deconstructed_output/
 │   │   ├── import_createRequire.js
 │   ├── base/
 │   │   ├── base.js
+├── variables_summary.md
+├── functions_summary.md
+├── arrow_functions_summary.md
+├── summaries/
+│   ├── structure_overview_summary.md
+│   ├── core_functionality_summary.md
+│   ├── data_structures_summary.md
+│   ├── module_system_summary.md
 ├── sourcemap.json
 ├── dependency_graph.json
 ├── llm_analysis.md
 ├── README.md
+├── metadata.json
+```
+
+## 🧹 Managing Output Directories
+
+The tool creates timestamped output directories to preserve each analysis run. To manage these directories, use the cleanup utility:
+
+```bash
+# List all output directories sorted by date (newest first)
+node src/utils/cleanup_outputs.js list
+
+# List directories sorted by size
+node src/utils/cleanup_outputs.js list --size
+
+# See what directories would be removed (older than 7 days, keeping 5 newest)
+node src/utils/cleanup_outputs.js cleanup
+
+# Actually remove old directories
+node src/utils/cleanup_outputs.js cleanup --force
+
+# Customize retention settings
+node src/utils/cleanup_outputs.js cleanup --days=14 --keep=3 --force
 ```
 
 ## 🔄 Pipeline Workflow
 
-The following Mermaid chart illustrates the pipeline’s top-down workflow, showing how a minified JavaScript file is processed through each step to produce the output.
+The following Mermaid chart illustrates the pipeline's top-down workflow, showing how a minified JavaScript file is processed through each step to produce the output.
 
 ```mermaid
 graph TD
     A[📄 Input File<br>input/cli.js] -->|Minified JS| B[🖌️ Prettier]
     B -->|Formatted Code| C[🔍 Webcrack]
     C -->|Deobfuscated Code| D[🌳 Tree-sitter]
-    D -->|Modular Files| E[🤖 LLM Analysis<br>Vertex AI or Ollama]
-    E -->|Descriptions| F[📂 Output<br>output/deconstructed_output/]
+    D -->|Modular Files| E1[Directory Analysis]
+    D --> E2[Category Analysis]
+    E1 -->|Per-directory Summaries| F[📂 Output<br>output/{filename}_{timestamp}/]
+    E2 -->|Comprehensive Analysis| F
     
     classDef pipeline fill:#4B8BBE,stroke:#333,stroke-width:2px,color:#FFF;
-    class A,B,C,D,E,F pipeline;
+    class A,B,C,D,E1,E2,F pipeline;
 ```
 
 **Pipeline Steps**:
 1. **🖌️ Prettier**: Formats minified code for readability, saving to `1_minified_prettier.js`.
 2. **🔍 Webcrack**: Deobfuscates variable names, saving to `2_minified_webcrack.js`.
 3. **🌳 Tree-sitter**: Parses code into modular files (e.g., functions, classes), saving to `3_minified_tree_sitter/`.
-4. **🤖 LLM Analysis**: Analyzes each file using either Google Vertex AI or Ollama, generating descriptions in `llm_analysis.md`.
-5. **📂 Output**: Includes sourcemap (`sourcemap.json`), dependency graph (`dependency_graph.json`), and a README.
+4. **Directory Analysis**: Creates summaries for each component type directory using a rolling window text summarizer.
+5. **Category Analysis**: Performs multi-faceted analysis of the codebase structure, functionality, data structures, and module system.
+6. **📂 Output**: Includes directory summaries (`*_summary.md`), comprehensive analysis (`llm_analysis.md`), sourcemap, dependency graph, and metadata.
 
 ## 📝 Notes
 
@@ -207,6 +247,8 @@ graph TD
   - Use `--output-dir` to specify a valid path (e.g., `output/custom`).
 - **Slow LLM calls**:
   - The script includes retry logic for Vertex AI rate limits. Check your quota at https://console.cloud.google.com.
+- **LLM timeouts**:
+  - If using Ollama and encountering timeouts, try reducing the number of files analyzed at once.
 
 ## 🌐 References
 
