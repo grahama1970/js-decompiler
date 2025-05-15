@@ -47,7 +47,7 @@
 const fs = require('fs').promises; // Async file operations (Python: asyncio.open)
 const path = require('path'); // Path manipulation (Python: os.path)
 
-// External npm modules
+// Load environment variables first, so they're available for constants
 require('dotenv').config({ path: path.join(__dirname, '../configs/.env') }); // Load .env variables (Python: python-dotenv)
 const prettier = require('prettier'); // Code formatting
 const webcrack = require('webcrack'); // Deobfuscation
@@ -63,6 +63,10 @@ const { sanitizeFilename, createFilePath, formatCodeWithComments } = require('./
 // Initialize Tree-sitter parser
 const parser = new Parser();
 parser.setLanguage(JavaScript);
+
+// Define defaults for CLI arguments
+const DEFAULT_LLM_PROVIDER = process.env.LLM_PROVIDER || 'vertex';
+const DEFAULT_OLLAMA_HOST = process.env.OLLAMA_HOST || 'http://localhost:11435';
 
 // Parse CLI arguments with yargs
 const argv = yargs
@@ -82,7 +86,7 @@ const argv = yargs
         type: 'string',
         description: 'LLM provider to use (vertex or ollama)',
         choices: ['vertex', 'ollama'],
-        default: LLM_PROVIDER,
+        default: DEFAULT_LLM_PROVIDER,
     })
     .option('llm-model', {
         type: 'string',
@@ -92,7 +96,7 @@ const argv = yargs
     .option('ollama-host', {
         type: 'string',
         description: 'Host URL for Ollama server',
-        default: OLLAMA_HOST,
+        default: DEFAULT_OLLAMA_HOST,
     })
     .check((argv) => {
         if (!argv._[0].endsWith('.js')) {
@@ -127,7 +131,9 @@ async function loadCredentials() {
     }
 }
 
-// LLM configuration
+// LLM configuration defined here after loading .env file above
+
+// LLM configuration 
 const LLM_PROVIDER = process.env.LLM_PROVIDER || 'vertex'; // 'vertex' or 'ollama'
 
 // Vertex AI model configuration
@@ -321,6 +327,11 @@ async function runTreeSitter(sourceCode, outputDir) {
 
     await processBaseCode();
     await saveChunks();
+    
+    // Copy sourcemap.json to the output directory (for compatibility with other functions)
+    const sourcemapContent = await fs.readFile(path.join(outputDir, 'sourcemap.json'), 'utf8');
+    await fs.writeFile(path.join(path.dirname(outputDir), 'sourcemap.json'), sourcemapContent);
+    
     return chunks;
 }
 
@@ -434,7 +445,7 @@ async function runLLMAnalysis(inputDir, sourcemapFile, dependencyGraphFile, outp
                     return response.content || 'No response from LLM';
                 } else if (llmProvider === 'ollama') {
                     // Call Ollama
-                    response = await ollama.chat({
+                    response = await llmModel.client.chat({
                         model: llmModel.model,
                         messages: [{ role: 'user', content: prompt }],
                         options: { 
@@ -538,9 +549,13 @@ async function runPipeline() {
             const hostUrl = argv.ollamaHost || OLLAMA_HOST;
             console.log(`Initializing Ollama with model: ${modelName} at ${hostUrl}`);
             
-            // Configure Ollama client
-            ollama.config({ host: hostUrl });
+            // Create an Ollama client instance
+            const ollamaClient = new ollama.Ollama({
+                host: hostUrl
+            });
+            
             llmModel = { 
+                client: ollamaClient,
                 model: modelName,
                 maxTokens: OLLAMA_MAX_TOKENS 
             };
@@ -560,8 +575,16 @@ async function runPipeline() {
         const chunks = await runTreeSitter(webcrackCode, treeSitterOutputDir);
         await addJSDocComments(treeSitterOutputDir);
         await generateDependencyGraph(treeSitterOutputDir, path.join(outputDir, 'dependency_graph.json'));
-        // Wait for file to be written before proceeding to next step
-        const sourcemapPath = path.join(outputDir, 'sourcemap.json');
+        // Path for sourcemap - could be in output directory or tree-sitter output directory
+        // Try both locations to handle potential variations in file location
+        let sourcemapPath;
+        try {
+            await fs.access(path.join(outputDir, 'sourcemap.json'));
+            sourcemapPath = path.join(outputDir, 'sourcemap.json');
+        } catch {
+            sourcemapPath = path.join(path.dirname(outputDir), 'sourcemap.json');
+        }
+        
         const dependencyGraphPath = path.join(outputDir, 'dependency_graph.json');
         
         // Skip LLM analysis if requested
